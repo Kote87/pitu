@@ -1,0 +1,41 @@
+# Parámetros de control (ajústalos a tu gusto)
+circadian:
+  morning_start: "07:00"   # inicio 'mañana brillante'
+  day_start:     "10:00"
+  evening_start: "19:30"
+  night_start:   "22:30"
+  cct_morning:   5300      # Kelvin
+  cct_day:       5000
+  cct_evening:   3000
+  cct_night:     2300
+  intensity_morning: 0.85  # 0..1
+  intensity_day:     0.75
+  intensity_evening: 0.35
+  intensity_night:   0.10
+
+weights:
+  # Pesos de moduladores (0..1)
+  activity_boost: 0.50     # aumenta intensidad con HR alta
+  stress_calm:    0.40     # reduce intensidad con estrés alto
+  sleep_debt:     0.30     # reduce intensidad si dormiste mal
+
+thresholds:
+  hr_rest: 58             # ppm en reposo (ajusta a tu perfil)
+  hr_high: 120            # ejercicio ligero/moderado
+  stress_high: 70         # 0..100
+  sleep_good: 75          # sleep score "bueno"
+  sleep_poor: 55          # sleep score "malo"
+
+limits:
+  cct_min: 2000
+  cct_max: 6000
+  intensity_min: 0.05
+  intensity_max: 1.00
+
+smoothing:
+  alpha: 0.25             # 0..1 (más alto = menos suavizado)
+  hysteresis: 0.04        # ±4% para evitar cambios mínimos
+
+serial:
+  port: "/dev/ttyACM0"    # en Windows podría ser "COM3"
+  baudrate: 9600
