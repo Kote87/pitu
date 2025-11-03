@@ -1,0 +1,15 @@
+[Unit]
+Description=Garmin Pull + snapshots + git autopush
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kote78
+WorkingDirectory=/home/kote78/garmin-led
+EnvironmentFile=/home/kote78/garmin-led/env.sh
+ExecStart=/home/kote78/garmin-led/.venv/bin/python /home/kote78/garmin-led/garmin_pull.py --loop --interval 600 --lookback 0 --git-autopush --git-branch data-stream
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
