@@ -12,7 +12,3 @@ Thumbs.db
 
 # SECRETOS (¡no subir!)
 env.sh
-
-# Datos generados por el runtime (JSON/CSV/snapshots)
-data/
-!data/.gitkeep

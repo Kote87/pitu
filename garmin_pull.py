@@ -1,153 +1,176 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-garmin_pull.py
-Descarga métricas clave de Garmin Connect (NO oficial) y las guarda en JSON/CSV.
-
-Uso:
-  export GARMIN_USER="correo"
-  export GARMIN_PASS="password"
-  python garmin_pull.py --loop --interval 600
-"""
-import os
-import time
-import json
-import argparse
-import datetime as dt
+import os, json, time, argparse, datetime as dt, subprocess, shlex
 from pathlib import Path
-from typing import Any, Dict, Optional
-
+from typing import Any, Dict
 import pandas as pd
 
 try:
     from garminconnect import Garmin
 except Exception as e:
-    raise SystemExit("Falta la librería 'garminconnect'. Instala con: pip install garminconnect") from e
+    raise SystemExit("Falta 'garminconnect'. Activa el venv e instala requirements.txt") from e
 
-
-DATA_DIR = Path(__file__).resolve().parent / "data"
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+SNAP_DIR = DATA_DIR / "snapshots"
 LATEST_JSON = DATA_DIR / "metrics_latest.json"
 LOG_CSV = DATA_DIR / "metrics_log.csv"
 
 def _env(name: str) -> str:
     v = os.environ.get(name)
     if not v:
-        raise RuntimeError(f"Variable de entorno requerida: {name}")
+        raise SystemExit(f"Variable requerida: {name}")
     return v
 
 def login_client() -> Garmin:
-    user = _env("GARMIN_USER")
-    pwd  = _env("GARMIN_PASS")
-    g = Garmin(user, pwd)
+    g = Garmin(_env("GARMIN_USER"), _env("GARMIN_PASS"))
     g.login()
     return g
 
-def safe_get(callable_fn, default=None):
-    try:
-        return callable_fn()
-    except Exception:
-        return default
+def safe_get(fn, default=None):
+    try: return fn()
+    except Exception: return default
 
-def fetch_metrics(g: Garmin) -> Dict[str, Any]:
-    today = dt.date.today().isoformat()
-
-    # Ejemplos de métodos de garminconnect (pueden variar según versión)
-    # Usamos 'safe_get' para tolerar endpoints no disponibles.
-    hr       = safe_get(lambda: g.get_heart_rates(today), default={})
-    sleep    = safe_get(lambda: g.get_sleep_data(today), default={})
-    stress   = safe_get(lambda: g.get_stress_data(today), default={})
-    summary  = safe_get(lambda: g.get_user_summary(today), default={})
-    bodybat  = safe_get(lambda: g.get_body_battery(today), default={})  # puede no existir en algunas versiones
-
-    # Derivados simples
+def extract_fields(hr, sleep, stress, summary):
     sleep_score = None
-    try:
-        # distintas estructuras posibles; intenta encontrar un score
-        if isinstance(sleep, dict):
-            sleep_score = sleep.get("sleepScore", None) or sleep.get("overallScore", None)
-    except Exception:
-        pass
-
-    # HR actual aproximado (último valor del día)
+    if isinstance(sleep, dict):
+        sleep_score = sleep.get("sleepScore") or sleep.get("overallScore")
     latest_hr = None
     try:
-        values = hr.get("heartRateValues") or hr.get("values", [])
+        values = (hr or {}).get("heartRateValues") or (hr or {}).get("values", [])
         if values:
-            # cada ítem puede ser [timestamp, valor] o dict
             last = values[-1]
             latest_hr = int(last[1]) if isinstance(last, list) and len(last) >= 2 else None
     except Exception:
         pass
-
-    # Estrés promedio reciente
     stress_avg = None
     try:
-        # stress["stressValuesArray"] puede contener pares [ts, val]
-        arr = stress.get("stressValuesArray", [])
-        if arr:
-            vals = [x[1] for x in arr if isinstance(x, list) and len(x) >= 2 and isinstance(x[1], (int, float))]
-            if vals:
-                stress_avg = sum(vals[-30:]) / min(len(vals), 30)  # promedio últimas ~30 muestras
+        arr = (stress or {}).get("stressValuesArray", [])
+        vals = [x[1] for x in arr if isinstance(x, list) and len(x) >= 2 and isinstance(x[1], (int,float))]
+        if vals:
+            n = min(len(vals), 30)
+            stress_avg = sum(vals[-n:]) / n
     except Exception:
         pass
-
     body_battery = None
     try:
-        # distintos nombres posibles
-        if isinstance(bodybat, dict):
-            body_battery = bodybat.get("bodyBattery", {}).get("value") or bodybat.get("value")
+        if isinstance(summary, dict):
+            bb = summary.get("bodyBatteryMostRecentValue")
+            if bb is None:
+                bb = (summary.get("bodyBattery") or {}).get("value")
+            body_battery = bb
     except Exception:
         pass
+    return latest_hr, sleep_score, stress_avg, body_battery
 
-    out = {
-        "timestamp": dt.datetime.now().isoformat(),
+def day_data(g: Garmin, date_str: str) -> Dict[str, Any]:
+    hr      = safe_get(lambda: g.get_heart_rates(date_str), {})
+    sleep   = safe_get(lambda: g.get_sleep_data(date_str), {})
+    stress  = safe_get(lambda: g.get_stress_data(date_str), {})
+    summary = safe_get(lambda: g.get_user_summary(date_str), {})
+    latest_hr, sleep_score, stress_avg, body_battery = extract_fields(hr, sleep, stress, summary)
+    return {
+        "date": date_str,
         "latest_hr": latest_hr,
         "sleep_score": sleep_score,
         "stress_avg": stress_avg,
         "body_battery": body_battery,
-        "raw": {
-            "summary": summary,
-        },
+        "raw": {"summary": summary},
     }
-    return out
 
-def append_csv(row: Dict[str, Any]):
+def has_any_data(d: Dict[str, Any]) -> bool:
+    if any([d.get("latest_hr"), d.get("sleep_score"), d.get("stress_avg"), d.get("body_battery")]):
+        return True
+    summary = (d.get("raw") or {}).get("summary") or {}
+    return bool(summary.get("includesWellnessData") or summary.get("minHeartRate") or summary.get("restingHeartRate"))
+
+def fetch_with_optional_lookback(g: Garmin, lookback_days: int) -> Dict[str, Any]:
+    today = dt.date.today()
+    for delta in range(0, max(0, lookback_days) + 1):
+        day = (today - dt.timedelta(days=delta)).isoformat()
+        d = day_data(g, day)
+        if has_any_data(d):
+            d["source_date"] = day
+            return d
+    d = day_data(g, today.isoformat())
+    d["source_date"] = today.isoformat()
+    return d
+
+def write_latest(obj: Dict[str, Any]):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LATEST_JSON, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+def write_snapshot(obj: Dict[str, Any]) -> Path:
+    SNAP_DIR.mkdir(parents=True, exist_ok=True)
+    now = dt.datetime.now()
+    snap_name = f"metrics_{now.strftime('%Y-%m-%d_%H-%M')}.json"
+    p = SNAP_DIR / snap_name
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    return p
+
+def append_csv(obj: Dict[str, Any]):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    row = {
+        "ts_iso": obj.get("timestamp"),
+        "label": obj.get("label"),
+        "source_date": obj.get("source_date"),
+        "latest_hr": obj.get("latest_hr"),
+        "sleep_score": obj.get("sleep_score"),
+        "stress_avg": obj.get("stress_avg"),
+        "body_battery": obj.get("body_battery"),
+    }
     df = pd.DataFrame([row])
     if LOG_CSV.exists():
         df.to_csv(LOG_CSV, mode="a", header=False, index=False)
     else:
         df.to_csv(LOG_CSV, index=False)
 
-def write_latest_json(obj: Dict[str, Any]):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(LATEST_JSON, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+def run(cmd, check=False):
+    return subprocess.run(shlex.split(cmd), cwd=str(BASE_DIR), capture_output=True, text=True, check=check)
+
+def git_autopush(files, branch="data-stream"):
+    # Intenta preparar rama y subir cambios; tolera "no hay cambios"
+    run(f"git pull --rebase origin {branch}")
+    run(f"git add {' '.join(str(f) for f in files)}")
+    msg = dt.datetime.now().strftime("data: %Y-%m-%d %H:%M snapshot")
+    commit = run(f"git commit -m {shlex.quote(msg)}")
+    if "nothing to commit" in commit.stdout.lower() + commit.stderr.lower():
+        return
+    run(f"git push origin {branch}")
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--loop", action="store_true", help="Ejecutar en bucle")
-    parser.add_argument("--interval", type=int, default=600, help="Segundos entre lecturas (def: 600)")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--loop", action="store_true", help="Ejecutar en bucle")
+    ap.add_argument("--interval", type=int, default=600, help="Segundos entre lecturas")
+    ap.add_argument("--lookback", type=int, default=0, help="Días hacia atrás si hoy está vacío")
+    ap.add_argument("--git-autopush", action="store_true", help="Añadir/commit/push de datos tras cada lectura")
+    ap.add_argument("--git-branch", default="data-stream", help="Rama a la que empujar los datos")
+    args = ap.parse_args()
 
     g = login_client()
-
     while True:
-        try:
-            metrics = fetch_metrics(g)
-            write_latest_json(metrics)
-            # Log 'bonito' al CSV con columnas planas
-            flat = {
-                "timestamp": metrics.get("timestamp"),
-                "latest_hr": metrics.get("latest_hr"),
-                "sleep_score": metrics.get("sleep_score"),
-                "stress_avg": metrics.get("stress_avg"),
-                "body_battery": metrics.get("body_battery"),
-            }
-            append_csv(flat)
-            print(f"[OK] {metrics.get('timestamp')} HR={metrics.get('latest_hr')} Stress={metrics.get('stress_avg')} SleepScore={metrics.get('sleep_score')}")
-        except Exception as e:
-            print(f"[WARN] Error al obtener/guardar métricas: {e}")
+        now = dt.datetime.now()
+        label = now.strftime("%d/%m/%y-%H:%M")
+        d = fetch_with_optional_lookback(g, args.lookback)
+        out = {"timestamp": now.isoformat(), "label": label, **d}
+
+        write_latest(out)
+        snap = write_snapshot(out)
+        append_csv(out)
+
+        print(f"[OK] {out['timestamp']} src={out.get('source_date')} "
+              f"HR={out.get('latest_hr')} Stress={out.get('stress_avg')} "
+              f"SleepScore={out.get('sleep_score')} BB={out.get('body_battery')} "
+              f"snap={snap.name}")
+
+        if args.git_autopush:
+            try:
+                files = [snap, LATEST_JSON, LOG_CSV]
+                git_autopush(files, branch=args.git_branch)
+            except Exception as e:
+                print("[WARN] git autopush falló:", e)
 
         if not args.loop:
             break
