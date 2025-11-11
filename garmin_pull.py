@@ -28,13 +28,16 @@ def login_client() -> Garmin:
     return g
 
 def safe_get(fn, default=None):
-    try: return fn()
-    except Exception: return default
+    try:
+        return fn()
+    except Exception:
+        return default
 
 def extract_fields(hr, sleep, stress, summary):
     sleep_score = None
     if isinstance(sleep, dict):
         sleep_score = sleep.get("sleepScore") or sleep.get("overallScore")
+
     latest_hr = None
     try:
         values = (hr or {}).get("heartRateValues") or (hr or {}).get("values", [])
@@ -43,6 +46,7 @@ def extract_fields(hr, sleep, stress, summary):
             latest_hr = int(last[1]) if isinstance(last, list) and len(last) >= 2 else None
     except Exception:
         pass
+
     stress_avg = None
     try:
         arr = (stress or {}).get("stressValuesArray", [])
@@ -52,6 +56,7 @@ def extract_fields(hr, sleep, stress, summary):
             stress_avg = sum(vals[-n:]) / n
     except Exception:
         pass
+
     body_battery = None
     try:
         if isinstance(summary, dict):
@@ -61,6 +66,7 @@ def extract_fields(hr, sleep, stress, summary):
             body_battery = bb
     except Exception:
         pass
+
     return latest_hr, sleep_score, stress_avg, body_battery
 
 def day_data(g: Garmin, date_str: str) -> Dict[str, Any]:
@@ -130,23 +136,24 @@ def append_csv(obj: Dict[str, Any]):
 def run(cmd, check=False):
     return subprocess.run(shlex.split(cmd), cwd=str(BASE_DIR), capture_output=True, text=True, check=check)
 
-def git_autopush(files, branch="data-stream"):
-    # Intenta preparar rama y subir cambios; tolera "no hay cambios"
+def git_autopush(branch="main"):
+    # Mantener el repo alineado y subir SOLO data/
     run(f"git pull --rebase origin {branch}")
-    run(f"git add {' '.join(str(f) for f in files)}")
+    run("git add -A data")
     msg = dt.datetime.now().strftime("data: %Y-%m-%d %H:%M snapshot")
     commit = run(f"git commit -m {shlex.quote(msg)}")
-    if "nothing to commit" in commit.stdout.lower() + commit.stderr.lower():
+    combined = (commit.stdout or "") + (commit.stderr or "")
+    if "nothing to commit" in combined.lower():
         return
     run(f"git push origin {branch}")
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", action="store_true", help="Ejecutar en bucle")
-    ap.add_argument("--interval", type=int, default=600, help="Segundos entre lecturas")
+    ap.add_argument("--interval", type=int, default=600, help="Segundos entre lecturas (10 min)")
     ap.add_argument("--lookback", type=int, default=0, help="Días hacia atrás si hoy está vacío")
-    ap.add_argument("--git-autopush", action="store_true", help="Añadir/commit/push de datos tras cada lectura")
-    ap.add_argument("--git-branch", default="data-stream", help="Rama a la que empujar los datos")
+    ap.add_argument("--git-autopush", action="store_true", help="Hacer add/commit/push de data/ tras cada lectura")
+    ap.add_argument("--git-branch", default="main", help="Rama a la que se empujan los datos")
     args = ap.parse_args()
 
     g = login_client()
@@ -167,8 +174,7 @@ def main():
 
         if args.git_autopush:
             try:
-                files = [snap, LATEST_JSON, LOG_CSV]
-                git_autopush(files, branch=args.git_branch)
+                git_autopush(branch=args.git_branch)
             except Exception as e:
                 print("[WARN] git autopush falló:", e)
 

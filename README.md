@@ -81,6 +81,42 @@ Este kit te da un **pipeline mínimo** para:
 
 ---
 
+## Despliegue en Raspberry Pi (pull cada 10 min + snapshots + autopush)
+
+```bash
+# 1) Traer el repo
+git clone https://github.com/Kote87/pitu.git ~/garmin-led
+cd ~/garmin-led
+
+# 2) Entorno Python
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3) Credenciales (NO subir a git)
+cat > env.sh << 'EOF'
+export GARMIN_USER="EMAIL_DEL_CLIENTE"
+export GARMIN_PASS="PASSWORD_DEL_CLIENTE"
+EOF
+chmod 600 env.sh
+
+# 4) Configurar SSH hacia GitHub para autopush (opcional pero recomendado)
+#   Genera clave y añádela en GitHub -> Settings -> SSH and GPG keys
+ssh-keygen -t ed25519 -C "pi@raspberry"
+cat ~/.ssh/id_ed25519.pub
+git remote set-url origin git@github.com:Kote87/pitu.git
+git config user.name  "Raspberry Pi"
+git config user.email "pi@raspberry"
+
+# 5) Instalar servicio (si el usuario es 'pi', pasa pi; ajusta si es otro)
+sudo ./scripts/install_systemd.sh pi
+
+# 6) Ver logs
+journalctl -u garmin-pull@pi.service -f
+```
+
+---
+
 ## Archivos
 
 - `garmin_pull.py` — descarga datos de Garmin y escribe JSON/CSV.
