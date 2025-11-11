@@ -10,9 +10,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# SECRETOS (¡no subir!)
-env.sh
-
 # Evitar subir claves por accidente
 id_ed25519
 id_ed25519.pub
